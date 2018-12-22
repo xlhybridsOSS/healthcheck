@@ -69,7 +69,7 @@ function HealthCheck(inopts) {
         opts.servers.forEach(function(s) {
             self.healthchecks_arr[s] = {
                 action_time: null,
-                down: false,
+                down: true,
                 failcount: 0,
                 passcount: 0,
                 last_status: "",
