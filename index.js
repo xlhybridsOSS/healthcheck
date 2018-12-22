@@ -1,7 +1,7 @@
 var http = require("http");
+var Agent = http.Agent;
 var https = require("https");
 var url = require("url");
-var Promise = require('es6-promise').Promise;
 var getDefer = function() {
     var deferred = {};
     deferred.promise = new Promise(function(resolve, reject) {
@@ -51,21 +51,27 @@ exports.status = function() {
 
 exports.HealthCheck = HealthCheck;
 
-function HealthCheck(opts) {
+function HealthCheck(inopts) {
+    const defaults = {
+        failthreshold: 2,
+        passthreshold: 2,
+        timeout: 2000,
+        delay: 10000,
+        servers: [],
+    }
+    const opts = {...defaults, ...inopts};
     var self = this;
     this.healthchecks_arr = {};
-
-    if (opts && opts.servers && opts.servers.length > 0) {
-        if (opts.delay === undefined) opts.delay = 10000;
-        if (opts.failcount === undefined) opts.failcount = 2;
-        if (opts.timeout === undefined) opts.timeout = 2000;
+    
+    if (opts.servers.length > 0) {
+        this.agent = new Agent({ keepAlive: true, timeout: opts.timeout })
 
         opts.servers.forEach(function(s) {
             self.healthchecks_arr[s] = {
                 action_time: null,
-                concurrent: 0,
                 down: false,
                 failcount: 0,
+                passcount: 0,
                 last_status: "",
                 owner: process.pid,
                 since: null
@@ -76,18 +82,18 @@ function HealthCheck(opts) {
         this.opts = opts;
         this.check();
         setInterval(function() {
+            // TODO: don't have overlapping checks for the same server
             self.check();
         }, opts.delay);
     }
 }
 
-HealthCheck.prototype.check = function() {
+HealthCheck.prototype.check = async function() {
     var servers = Object.keys(this.healthchecks_arr);
     var opts = this.opts;
     var self = this;
 
-    var promises = servers.map(function(s) {
-        var deferred = getDefer();
+    var checks = servers.map(function(s) {
         var time = new Date();
         var hc = self.healthchecks_arr[s];
         if (!hc.since) hc.since = time;
@@ -96,79 +102,70 @@ HealthCheck.prototype.check = function() {
         var u = url.format({
             protocol: (opts.https ? 'https:' : 'http:'),
             host: s,
-            pathname: (opts.send || "/")
+            pathname: (opts.path || "/")
         });
         u = url.parse(u);
-        var ended = false;
 
         var library = opts.https ? https : http;
-        var request = library.get({
+        var req = library.get({
             host: u.hostname,
             port: u.port,
-            agent: false,
+            agent: self.agent,
             path: u.pathname
-        }, function(response) {
-            var result = new Buffer('');
-            if (response.statusCode == 200) {
-                response.on("data", function(chunk) {
-                    result = Buffer.concat([result, chunk]);
-                });
-                response.on("end", function() {
-                    if (ended) return null;
-                    if (opts.expected) {
-                        if (opts.expected == result.toString()) {
-                            hc.last_status = HEALTH_STATE[0];
-                            hc.failcount = 0;
-                            hc.down = false;
+        });
+        
+        return new Promise((resolve, reject) => {
+            req.on('response', (res) => {
+                if(opts.expected && res.statusCode === 200) {
+                    let bod = Buffer.alloc(0);
+                    res.on('data', (d) => {
+                        bod = Buffer.concat([bod, d])
+                    });
+                    res.on('end', () => {
+                        if(bod.equals(opts.expected)) {
+                            resolve(1);
                         } else {
-                            hc.last_status = HEALTH_STATE[3];
-                            hc.failcount += 1;
-                            if (hc.failcount >= opts.failcount) hc.down = true;
+                            resolve(-1);
                         }
-                    } else {
-                        hc.last_status = HEALTH_STATE[0];
-                        hc.failcount = 0;
-                        hc.down = false;
-                    }
-                    deferred.resolve(hc);
-                });
+                    })
+                    res.on('error', (e) => reject(e))
+                } else if (res.statusCode === 200) {
+                    resolve(1);
+                } else {
+                    resolve(-1);
+                }
+            })
+            req.on('timeout', () => resolve(-1));
+            req.on('error', (e) => reject(e));
+        }).then((passfail) => {
+            if (passfail < 0) {
+                hc.failcount = Math.max(hc.failcount + 1, opts.failthreshold);
+                hc.passcount = 0;
+                if (!hc.down && hc.failcount >= opts.failthreshold) {
+                    hc.down = true;
+                    if (opts.onFail) opts.onFail.bind({})(s);
+                }
             } else {
-                hc.last_status = HEALTH_STATE[6];
-                hc.failcount += 1;
-                if (hc.failcount >= opts.failcount) hc.down = true;
-                deferred.resolve(hc);
+                hc.passcount = Math.max(hc.passcount + 1, opts.passthreshold);
+                hc.failcount = 0;
+                if (hc.down && hc.passcount >= opts.passthreshold) {
+                    hc.down = false;
+                    if (opts.onPass) opts.onPass.bind({})(s);
+                }
             }
-        });
-
-        request.on('socket', function(socket) {
-            socket.setTimeout(opts.timeout);
-            socket.on('timeout', function() {
-                ended = true;
-                request.abort();
-                hc.last_status = HEALTH_STATE[7];
-                hc.failcount += 1;
-                if (hc.failcount >= opts.failcount) hc.down = true;
-                deferred.resolve(hc);
-            });
-        });
-
-        request.on('error', function(error) {
-            ended = true;
-            hc.last_status = error.message;
-            hc.failcount += 1;
-            if (hc.failcount >= opts.failcount) hc.down = true;
-            deferred.resolve(hc);
-        });
-        return deferred.promise;
+        }).catch((e) => {
+            hc.failcount = Math.max(hc.failcount + 1, opts.failthreshold);
+            hc.passcount = 0;
+            if (!hc.down && hc.failcount >= opts.failthreshold) {
+                hc.down = true;
+                if (opts.onFail) opts.onFail.bind({})(s);
+            }
+        })
     });
-
-    Promise.all(promises).then(function(result) {
-        result.forEach(function(hc) {
-            hc.concurrent += 1;
-        });
-        if (typeof opts.logger === "function") opts.logger(self.healthchecks_arr);
+    return Promise.all(checks).finally(() => {
+        if (opts.logger) opts.logger(self.healthchecks_arr);
     });
-};
+}
 
 HealthCheck.prototype.is_down = function(name) {
     var hc = this.healthchecks_arr[name];
