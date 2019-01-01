@@ -139,14 +139,14 @@ HealthCheck.prototype.check = async function() {
             req.on('error', (e) => reject(e));
         }).then((passfail) => {
             if (passfail < 0) {
-                hc.failcount = Math.max(hc.failcount + 1, opts.failthreshold);
+                hc.failcount = Math.min(hc.failcount + 1, opts.failthreshold);
                 hc.passcount = 0;
                 if (!hc.down && hc.failcount >= opts.failthreshold) {
                     hc.down = true;
                     if (opts.onFail) opts.onFail.bind({})(s);
                 }
             } else {
-                hc.passcount = Math.max(hc.passcount + 1, opts.passthreshold);
+                hc.passcount = Math.min(hc.passcount + 1, opts.passthreshold);
                 hc.failcount = 0;
                 if (hc.down && hc.passcount >= opts.passthreshold) {
                     hc.down = false;
@@ -154,7 +154,7 @@ HealthCheck.prototype.check = async function() {
                 }
             }
         }).catch((e) => {
-            hc.failcount = Math.max(hc.failcount + 1, opts.failthreshold);
+            hc.failcount = Math.min(hc.failcount + 1, opts.failthreshold);
             hc.passcount = 0;
             if (!hc.down && hc.failcount >= opts.failthreshold) {
                 hc.down = true;
