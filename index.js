@@ -177,5 +177,5 @@ HealthCheck.prototype.is_down = function(name) {
 };
 
 HealthCheck.prototype.status = function() {
-    return this.healthchecks_arr;
+    return Object.values(this.healthchecks_arr);
 };
